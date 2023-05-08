@@ -701,6 +701,47 @@ node029
 
 == Batch Files
 
+We now know how to submit jobs to the grid, but passing the commands directly
+to `srun` is only convenient for very simple commands. If we want to make our
+jobs more complex (possibly including multiple steps) and more reproducible
+(meaning we don't need to remember all the flags we pass to `srun`), we will
+need to learn about SLURM _batch_ scripts. Batch scripts are very similar to
+shell scripts, except that they can carry additional metadata about how we want
+SLURM to treat our jobs. Let's write our very first batch script, `example.sh`,
+now:
+
+#note[
+```bash
+#!/bin/bash
+
+echo "Hello world"
+hostname
+```
+]
+
+The structure of this file is simple: the first line contains a so-called
+_shebang_, which indicates the shell to use when intepreting the script. In
+most cases, `/bin/bash` will do just fine. The remainder of the script contains
+the commands we want to execute. Batch scripts are submitted to SLURM using the
+`sbatch` command, which simply takes the name of the script we want to execute.
+By default, `sbatch` will output to a file rather than to the command line, and
+batch jobs run asynchronously: the `sbatch` command completes immediately, but
+this does not mean that the job is actually finished. We may need to wait for
+it to be allocated and for it to finish running:
+
+#note[
+```
+$ sbatch example.sh
+Submitted batch job 58144
+
+# The sbatch command completes immediately
+# This does not mean the job is complete!
+
+$ cat slurm-58144.out
+node004
+```
+]
+
 === Job Arrays
 
 === Steps
