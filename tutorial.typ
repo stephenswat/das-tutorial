@@ -619,8 +619,7 @@ srun: job 57773 has been allocated resources
 The `--gres` flag specifies general resources, which includes GPUs. Like the
 `-C` flag, specifying GRES requirements allows us to request specific GPU
 types, and it also requires the resources to be available on every single node
-in the job. However, feature flags do not allow us to request a certain number
-of GPUs, and GRES requirements do:
+in the job.
 
 #note[
 ```
@@ -695,9 +694,24 @@ node029
 ]
 
 
+=== Exclusivity
 
+Depending on which of the DAS partitions you are using, nodes may be -- by
+default -- allocated exclusively or not. When you reserve a node exclusively,
+no other jobs can run on that node at the same time as your job. Non-exclusive
+jobs can share resources on the same node between then. For example, a node
+with 10 CPU cores can comfortably have a non-exclusive 6-core job and a
+non-exclusive 4-core job from a different user running on it at the same time.
 
-*TODO:* Exclusivity
+Whether or not you want exclusivity or not depends on the kind of research you
+are doing. If the the desired output of your job is the result of some
+computation, e.g. you are running a fluid simulation or training a neural
+network, then you don't need to worry about exclusivity. If the output of your
+job is some metrics about the computation _itself_, e.g. if you are
+benchmarking software on a specific GPU, or if you are measuring power
+consumption, then you should request exclusive access to a node using the
+`--exclusive` flag. If you are happy to share nodes between your own jobs but
+not with other users' jobs, you can use `--exclusive=user`.
 
 == Batch Files
 
@@ -738,16 +752,447 @@ Submitted batch job 58144
 # This does not mean the job is complete!
 
 $ cat slurm-58144.out
+Hello world
 node004
 ```
 ]
 
+The main advantage of using batch files is that we can encode properties about
+_how_ we want to run jobs into the job itself. This means that we don't need to
+remember the flags to `srun`, we can simply put them in the script itself. We
+do this using `SBATCH` comments at the top of the file. Consider the following
+batch script which runs on a node with an NVIDIA A4000 and has a maximum
+running time of one minute. Notice also that this allows us to run multiple
+commands in sequence!
+
+#note[
+```bash
+#!/bin/bash
+#SBATCH -C A4000
+#SBATCH -t 0:01:00
+
+hostname
+lspci | grep NVIDIA
+```
+]
+
+Running this job gives us the expected result:
+
+#note[
+```
+$ sbatch example2.sh
+Submitted batch job 65765
+
+$ cat slurm-65765.out
+node003
+43:00.0 VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000] (rev a1)
+43:00.1 Audio device: NVIDIA Corporation GA104 High Definition Audio Controller (rev a1)
+```
+]
+
+To reiterate, the advantage of using batch scripts -- from what we have seen so
+far -- is that they allow us to encode SLURM flags into the script itself, and
+that they allow us to run multiple commands in sequence. Let's extend our
+script to run on multiple nodes, just like we did with `srun`. We'll consider
+the following batch file:
+
+#note[
+```bash
+#!/bin/bash
+#SBATCH --nodes=4
+
+hostname
+```
+]
+
+Running this script gives the following output:
+
+#note[
+```
+$ sbatch example3.sh
+Submitted batch job 65766
+
+$ cat slurm-65766.out
+node031
+```
+]
+
+Interestingly, we only get the output from a single node. This behaviour
+differs from what we saw with `srun`: when submitting a job to multiple nodes
+using `srun`, they _all_ run the command. When we submit a job to multiple
+nodes using `sbatch`, only one of the nodes runs the job. This may seem
+unintuitive and silly, but it is actually a powerful idea: SLURM is allowing us
+to carve up the reservation however we please. If we reserve five nodes, we can
+have three of them run one part of the job and two run another part.
+
+This partitioning is done, confusingly, using `srun`. Thus, `srun` does two
+different things depending on when and where you run it: if you use `srun`
+_outside_ of an existing SLURM allocation, it will make a new allocation for
+you and distribute work over it. If you use `srun` _inside_ an existing
+allocation, it allows you to carve up that partition into smaller _steps_. As
+an example, let's construct a job that reserves four nodes. First, we'll run a
+single step on each of those nodes; then, in the same allocation, we'll run
+_multiple_ steps on each of the reserved nodes:
+
+#note[
+```bash
+#!/bin/bash
+#SBATCH --nodes=4
+
+echo "The script is executed by $(hostname)"
+echo "STEP 1:"
+srun --tasks-per-node=1 hostname
+echo "STEP 2:"
+srun --tasks-per-node=2 hostname
+```
+]
+
+Running this code results in the following output:
+
+#note[
+```
+$ sbatch example4.sh
+Submitted batch job 65863
+
+$ cat slurm-65863.out
+The script is executed by node031
+STEP 1:
+node031
+node033
+node032
+node034
+STEP 2:
+node031
+node033
+node032
+node034
+node031
+node033
+node032
+node034
+```
+]
+
+It is valuable to consider what happened here. The `--nodes=4` flag at the top
+of the batch file requests a _reservation_ of four nodes. In this particular
+case, we were allocated nodes 31, 32, 33, and 34. As the node is executed, the
+script is executed a _single_ time, by node 31. This node requests the
+allocation to be partitioned into steps, with each node in the allocation
+handling one task. Thus, we see four printouts during the first step. Nodes 32,
+33, and 34 then return to being idle and node 31 issues a second command,
+requesting _two_ commands per node this time, resulting in eight more
+print-outs.
+
+Sometimes we want nodes to perform heterogeneous work. SLURM allows us to run
+`srun` commands in the background and thereby run multiple different partitions
+at the same time. We use the ampersand shell operator for this: placing `&` at
+the end of a command returns immediately, even if the command has not finished
+running. We can issue multiple commands into the background and wait for them
+using the `wait` command. In this case, we also need to -- confusingly -- pass
+the `--exclusive` flag to the `srun` commands; this flag has a different
+meaning in step allocations (running `srun` inside jobs) than it has in job
+allocations. Observe the following batch script:
+
+#note[
+```bash
+#!/bin/bash
+#SBATCH --tasks=8
+
+srun --exclusive --ntasks=4 echo "STEP A" &
+srun --exclusive --ntasks=2 echo "STEP B" &
+srun --exclusive --ntasks=2 echo "STEP C" &
+wait
+```
+]
+
+And here is what happens when we run it:
+
+#note[
+```
+$ sbatch example5.sh
+Submitted batch job 65879
+
+$ cat slurm-65879.out
+STEP C
+STEP A
+STEP A
+STEP B
+STEP B
+STEP C
+STEP A
+STEP A
+```
+]
+
+Notice how the print-outs are out of order: they are being executed in
+parallel. We can also use steps to partition special resources across tasks. We
+will now construct a rather odd batch script to demonstrate the control SLURM
+gives you over job allocation:
+
+#note[
+```bash
+#!/bin/bash
+#SBATCH -C "[A2*3&A4000*1]"
+#SBATCH --ntasks=6
+#SBATCH -w node020
+#SBATCH --nodes=6
+
+srun --exclusive --nodes=1 --ntasks=1 --gres=gpu:A4000:1 echo "This job has an A4000 GPU" &
+srun --exclusive --nodes=2 --ntasks=2 --gres=gpu:A2:1 echo "This job has an A2 GPU" &
+srun --exclusive --nodes=1 --ntasks=1 --gres=gpu:A2:2 echo "This job has two A2 GPUs" &
+srun --exclusive --nodes=2 --ntasks=2 --gres=none echo "This job is a CPU job" &
+wait
+```
+]
+
+It is unlikely that you will need to write such complex SLURM batch scripts,
+but let's go over what this program does. The `[A2*3&A4000*1]` constraint
+specifies that we want three nodes with _at least_ one NVIDIA A2 GPU, as well
+as one node with an NVIDIA A4000 GPU. Then, we specify that we want six nodes
+and six tasks. Finally, we specify that we want node 20 specifically. The
+reason for this is that it the only node with multiple NVIDIA A2 GPUs. While
+the `-C` syntax allows us to specify that we want nodes with _at least one_ A2,
+we cannot specify that we want nodes with _at least two_ A2 GPUs. Including
+node 20 in the nodelist explicitly ensures that we have access to the right
+node. Finally, the job issues four steps, requesting the necessary resources
+for each job.
+
+#tip[
+  By default, steps inherit options from the `sbatch` script that invokes them.
+  For example, if your batch script sets `--gres=gpu:1`, this will be
+  automatically inherited by all steps in it. If you want some of your steps
+  not to use a GPU, you can use `--gres=none` on the `srun` commands to
+  override the inherited behaviour.
+]
+
 === Job Arrays
 
-=== Steps
+The combination of batch scripting an `srun` allows us to run jobs in which we
+precisely control what happens, in which order, where, and when. This is useful
+for application in which synchronization is important, e.g. when using MPI to
+compute things which would not fit in the memory of a single machine. In other
+cases, our goal is not to do one enormous computation at once but rather to
+performance many independent computations in any order. It is in these cases
+that _job arrays_ can be more appropriate than single, large allocations.
+
+Job arrays do not require that the entire computation happens simultaneously
+which eases resource requirements significantly. A compute job that takes
+twenty nodes might take a while to be allocated on DAS, but twenty jobs that
+take one node each will be completed much more quickly. Job arrays can be
+specified using the `-a` flag in `sbatch`. For example, the following batch
+script creates a job array of four jobs, numbered 0 through 3:
+
+#note[
+```bash
+#!/bin/bash
+#SBATCH -a 0-3
+#SBATCH -t 0:01:00
+
+echo "I am job ${SLURM_ARRAY_TASK_ID} on node $(hostname)!"
+```
+]
+
+Executing this job gives the following result. Note how the outputs are split
+between different files!
+
+#note[
+```
+$ sbatch example_array.sh
+Submitted batch job 65836
+
+$ cat slurm-65836_0.out
+I am job 0 on node node015!
+
+cat slurm-65836_*.out
+I am job 0 on node node015!
+I am job 1 on node node001!
+I am job 2 on node node002!
+I am job 3 on node node031!
+```
+]
+
+To drive home the utility of job arrays, let's do something that would be
+impossible to do without job arrays: launch multiple jobs that occupy _the
+same_ node entirely:
+
+#note[
+```bash
+#!/bin/bash
+#SBATCH -a 0-15
+#SBATCH -w node001
+#SBATCH --tasks-per-node
+#SBATCH -t 0:01:00
+
+sleep 10
+echo "I am job ${SLURM_ARRAY_TASK_ID} on node $(hostname)!"
+```
+]
+
+Because job arrays do not need to run at the same time, this overallocation is
+not a problem. We can see this in the job queue:
+
+#note[
+```
+$ sbatch example_array2.sh
+Submitted batch job 65844
+
+$ squeue
+       JOBID PARTITION     USER ST       TIME  NODES NODELIST(REASON)
+65844_[8-15]      defq sswatman PD       0:00      1 (Resources)
+     65844_7      defq sswatman  R       0:08      1 node001
+```
+]
+
+As you can see, one of the jobs in the array (number 7) is current running on
+the specified node. Jobs 0 through 6 have already completed, and jobs 8 through
+15 are waiting to execute.
 
 === Cancelling Jobs
 
+Sometimes, we start jobs and realize that we mistyped some important
+configuration parameter, or we notice a bug in the software. In those cases,
+please cancel the job to ensure that resources become available -- to yourself
+or to your fellow DAS users -- as soon as possible. In order to cancel a job,
+we simply use the `scancel` command:
+
+#note[
+```
+$ sbatch --wrap="sleep 100000"
+Submitted batch job 60421
+
+# Oh no! Let's not waste 100,000 seconds of compute time!
+
+$ scancel 60421
+```
+]
+
+It is also possible to retroactively modify properties of jobs using the
+`scontrol` command. You will rarely need this and you can use this command in
+many different ways. It's outside of the scope of this tutorial, but you can
+consult the official SLURM documentation for more information.
+
 == Environment Modules
 
-== Final Remarks
+By default, the DAS machines give you access to only a few compilers and
+libraries. If you're looking to compile something for CUDA devices, you'll soon
+notice that the `nvcc` compiler is not available:
+
+#note[
+```
+$ nvcc
+zsh: command not found: nvcc
+```
+]
+
+Don't worry! The CUDA tookit _is_ installed, it is simply not enabled by
+default. You can enable the CUDA toolkit using _environment modules_, which
+describe exactly and reversibly how to modify your environment in order to make
+software available to you. As an example, the following will make CUDA
+available to you on the VU partition on DAS-6:
+
+#note[
+```
+$ module load cuda11.7/toolkit/11.7
+
+$ nvcc --version
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2022 NVIDIA Corporation
+Built on Wed_Jun__8_16:49:14_PDT_2022
+Cuda compilation tools, release 11.7, V11.7.99
+Build cuda_11.7.r11.7/compiler.31442593_0
+```
+]
+
+If you are on the VU partition of DAS-5, the invocation is very similar:
+
+#note[
+```
+$ module load cuda11.0/toolkit/11.0.3
+
+$ $ nvcc --version
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2020 NVIDIA Corporation
+Built on Wed_Jul_22_19:09:09_PDT_2020
+Cuda compilation tools, release 11.0, V11.0.221
+Build cuda_11.0_bu.TC445_37.28845127_0
+```
+]
+
+Installed software differs slightly between DAS-5 and DAS-6. You can always
+find out which modules are available by using the following command:
+
+#note[
+```
+$ module avail
+
+------------------ /cm/local/modulefiles ------------------
+cluster-tools/8.0 etcd/3.1.5        module-git
+cmd               flannel/0.7.0     module-info
+cmsh              freeipmi/1.5.5    null
+cm-upgrade/7.2    gcc/6.3.0         openldap
+cm-upgrade/8.0    ipmitool/1.8.18   shared
+dot               lua/5.3.4
+
+----------------- /cm/shared/modulefiles ------------------
+acml/gcc/64/5.3.1
+acml/gcc/fma4/5.3.1
+acml/gcc/mp/64/5.3.1
+acml/gcc/mp/fma4/5.3.1
+...
+```
+]
+
+All of these packages can be loaded as desired, and you can even install your
+own packages in a personal module environment on `/var/scratch/`. If you need
+any inspiration on how to setup your own personal modules, you can take a look
+at the `/var/scratch/sswatman/.modules/` directory on VU DAS-6.
+
+You can find out which modules you have loaded using `module list`, and you can
+unload module at any time using the `module unload` command. For example:
+
+#note[
+```
+$ nvcc --version
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2022 NVIDIA Corporation
+Built on Wed_Jun__8_16:49:14_PDT_2022
+Cuda compilation tools, release 11.7, V11.7.99
+Build cuda_11.7.r11.7/compiler.31442593_0
+
+$ module unload cuda11.7/toolkit/11.7
+
+$ nvcc --version
+zsh: command not found: nvcc
+```
+]
+
+Finally, it is worth noting that virtually all SLURM commands inherit their
+environment from the invocation site. Thus, loading software on the head node
+makes it available on the worker nodes as well:
+
+#note[
+```
+$ nvcc --version # On the head node...
+zsh: command not found: nvcc
+
+$ srun nvcc --version # On a worker node...
+slurmstepd: error: execve(): nvcc: No such file or directory
+srun: error: node015: task 0: Exited with exit code 2
+
+$ module load cuda11.7/toolkit/11.7 # On the head node...
+
+$ nvcc --version # On the head node...
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2022 NVIDIA Corporation
+Built on Wed_Jun__8_16:49:14_PDT_2022
+Cuda compilation tools, release 11.7, V11.7.99
+Build cuda_11.7.r11.7/compiler.31442593_0
+
+$ srun nvcc --version # On a worker node...
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2022 NVIDIA Corporation
+Built on Wed_Jun__8_16:49:14_PDT_2022
+Cuda compilation tools, release 11.7, V11.7.99
+Build cuda_11.7.r11.7/compiler.31442593_0
+```
+]
